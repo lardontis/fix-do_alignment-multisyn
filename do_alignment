@@ -1,0 +1,410 @@
+#!/bin/bash
+
+# currently assumes: phone_list, substitutions,  train.scp
+
+usage()
+{
+    bin=`basename $0`
+    echo "Usage: $bin [-i <init_hmm>][-r <n>][-s] root_directory"
+    echo
+    echo " -i <init_hmm>    directory containing MMF and vFloors to initialise from"
+    echo " -s               use slf lattices for later stages of alignment rather than phone sequences"
+    echo " -r <n>           restart alignment at iteration <n>"
+    exit 1
+}
+
+
+
+slf=0
+r=-1
+init=""
+
+# Process command line arguements
+while [ $# -gt 0 ]
+do
+    case "$1" in
+        -s) slf=1;;
+	-r) r="$2"; shift;;
+	-i) init="$2"; shift;;
+	--) shift; break;;
+	-*) usage ;; 
+	*)  root=$1;
+            break;;	# terminate while loop
+    esac
+    shift
+done
+
+
+if [ ! -d "$root" ] ; then
+  echo "Root directory '$root' does not exist"
+  usage
+fi
+
+if [ "$init" -a ! -d "$init" ] ; then
+    echo "Initialisation directory '$init' not found"
+    usage
+fi
+
+##
+## GENERAL SETUP
+##
+
+# if not restarting do setup
+if [ $r -eq -1 ] ; then
+
+    echo "CHANGING DIRECTORY"
+    cd $root
+
+    echo "CHECKING FOR FILES"
+
+    if [ ! -r "phone_list" ] ; then
+	echo "phone_list not found"
+	exit 1
+    fi
+    if [ ! -r "phone_substitutions" ] ; then
+	echo "phone_substitutions not found"
+	exit 1
+    fi
+    if [ ! -r "train.scp" ] ; then
+	echo "train.scp not found"
+	exit 1
+    fi
+    if [ ! -r "aligned.0.mlf" ] ; then
+	echo "aligned.0.mlf not found"
+	echo "(I am no longer using ../utts.mlf)"
+	exit 1
+    fi
+    
+    if [ ! -d "resources" ] ; then
+	echo "resources not found"
+	exit 1
+    fi
+    if [ ! -d "proto" ] ; then
+	echo "proto not found"
+	exit 1
+    fi
+
+    # create dict and dict2
+    echo "CREATING DICT"
+    awk '{print $1 " " $1}' phone_list > dict
+    echo "CREATING DICT2"
+    cat dict phone_substitutions > dict2
+
+    if [ $slf = 1 ] ; then
+	echo "CREATING SLF phone_list"
+	cp phone_list phone_list_slf
+	cat >> phone_list_slf<<EOF
+.
+#1
+#2
+EOF
+cp dict dict_slf
+cat >> dict_slf<<EOF
+. .
+#1 #1
+#2 #2
+EOF
+    fi
+
+    # create "no sp" initial labels
+    grep -v "^sp" aligned.0.mlf > aligned.0.nosp.mlf   
+
+    # Generate Master Model file
+    echo "CREATING MASTER MODEL FILE"
+    mkdir -p hmm0
+
+    if [ "$init" ] ; then
+	echo " COPYING VARIENCE FLOOR"
+	if [ ! -r $init/vFloors ] ; then
+	    echo "Copying $init/vFloors failed, Aborted!" ; exit 1
+	fi
+	cp $init/vFloors hmm0
+	
+	echo " COPYING MODELS"
+	if [ ! -r $init/MMF ] ; then
+	    echo "Copying $init/MMF failed, Aborted!" ; exit 1
+	fi
+	cp $init/MMF hmm0
+    else
+
+	echo " SETTING VARIENCE FLOOR"
+	HCompV -C config -f 0.01 -m -S train.scp -M hmm0 proto/5states
+	if [ $? -gt 0 ] ; then echo "Set varience floor failed, Aborted!" ; exit 1 ; fi
+    
+        # create models
+	echo " GENERATING MODELS"
+	for m in `cat phone_list` ; do
+	    if [ "$m" != "sp" ] ; then
+		grep -v "~h" hmm0/5states > hmm0/$m
+	    else 
+		cp proto/3states hmm0/$m
+	    fi
+	done
+        HHEd -d hmm0 -w hmm0/MMF resources/tie_silence.hed phone_list
+        if [ $? -gt 0 ] ; then echo "Build master model file failed, Aborted!" ; exit 1 ; fi
+	
+    fi  
+fi
+
+###
+### INITIAL TRAINING
+###
+
+if [ "$r" -eq -1 ] ; then
+  r=0
+fi
+
+i=0
+
+# Re-estimation
+for j in 1 2 3; do
+    if [ ! $r -gt $i ] ; then
+	echo "RE-ESTIMATING MODEL PARAMETERS PHASE 1 (ITERATION $i)"
+	mkdir -p hmm$[$i +1]
+	tam_file=$(wc -l < train.scp)
+	iterations=$(($tam_file / 1000))
+	rest=$(($tam_file - (($iterations * 1000))))
+
+	for k in `seq $iterations`;
+	do
+		file_aux=$(head -$(( $k * 1000 )) train.scp | tail -1000)
+		echo "$file_aux" > ./file_aux
+		HERest -p $k -C config -T 1023 -t 250.0 150.0 1000.0 -H hmm${i}/MMF -H hmm0/vFloors -I aligned.0.nosp.mlf -M hmm$[$i +1] -S file_aux phone_list
+	done
+	if [ $rest > 0 ] ; then
+		file_aux=$(head -$(( $k * 1000 )) train.scp | tail -$rest)
+		echo "$file_aux" > ./file_aux
+		HERest -p $(($iterations +1)) -C config -T 1023 -t 250.0 150.0 1000.0 -H hmm${i}/MMF -H hmm0/vFloors -I aligned.0.nosp.mlf -M hmm$[$i +1] -S file_aux phone_list
+	fi
+	
+	HERest -p 0 -C config -T 1023 -t 250.0 150.0 1000.0 -H hmm${i}/MMF -H hmm0/vFloors -M hmm$[$i +1]  phone_list hmm$[$i +1]/*.acc
+
+	if [ $? -gt 0 ] ; then echo "Re-estimation $i failed, Aborted!" ; exit 1 ; fi
+    fi
+    i=$[$i + 1]
+done
+
+# These don't seem to actually be used!
+P1=1000       # initial beamsearch thresh for HVite
+P2=100000     # if aligning fails, increase by that amout
+P3=1000000    # up to this number
+
+# Realignment to correct labelling:
+if [ ! $r -gt $i ] ; then
+    echo "FIRST ALIGNMENT AND VOWEL REDUCTION (ITERATION $i)"
+    HVite -l \* -C config  -a -m -I aligned.0.nosp.mlf -H hmm${i}/MMF -i aligned.1.mlf -m \
+	-S train.scp -y lab dict2 phone_list
+    if [ $? -gt 0 ] ; then echo "First alignment failed, Aborted!" ; exit 1 ; fi
+
+    if [ `egrep lab aligned.1.mlf|wc -l` != `egrep lab aligned.0.nosp.mlf|wc -l` ] ; then
+	echo "alignment failed for the following file(s):"
+	egrep lab aligned.0.mlf > aligned.0.uttlist
+	egrep lab aligned.1.mlf > aligned.1.uttlist
+	comm -23 aligned.0.uttlist aligned.1.uttlist
+	echo "try a larger beam search thresh for HVite.  Aborted!"
+	exit 1
+    fi
+fi
+
+# Reestimate a few more times
+for j in 1 2 3; do
+    if [ ! $r -gt $i ] ; then
+	    echo "RE-ESTIMATING MODEL PARAMETERS PHASE 2 (ITERATION $i)"
+	    mkdir -p hmm$[$i +1]
+
+	    #HERest  -C config -T 1 -t 250.0 150.0 1000.0 -H hmm${i}/MMF -H hmm0/vFloors -I aligned.1.mlf -M hmm$[$i +1] -S train.scp phone_list
+
+		tam_file=$(wc -l < train.scp)
+		iterations=$(($tam_file / 1000))
+		rest=$(($tam_file - (($iterations * 1000))))
+
+		for k in `seq $iterations`;
+		do
+			file_aux=$(head -$(( $k * 1000 )) train.scp | tail -1000)
+			echo "$file_aux" > ./file_aux
+			HERest -p $k -C config -T 1 -t 250.0 150.0 1000.0 -H hmm${i}/MMF -H hmm0/vFloors -I aligned.1.mlf -M hmm$[$i +1] -S file_aux phone_list
+		done
+		if [ $rest > 0 ] ; then
+			file_aux=$(head -$(( $k * 1000 )) train.scp | tail -$rest)
+			echo "$file_aux" > ./file_aux
+			HERest -p $(($iterations +1)) -C config -T 1 -t 250.0 150.0 1000.0 -H hmm${i}/MMF -H hmm0/vFloors -I aligned.1.mlf -M hmm$[$i +1] -S file_aux phone_list
+		fi
+	
+		HERest -p 0 -C config -T 1 -t 250.0 150.0 1000.0 -H hmm${i}/MMF -H hmm0/vFloors -M hmm$[$i +1]  phone_list hmm$[$i +1]/*.acc
+
+	    if [ $? -gt 0 ] ; then echo "Re-estimation $i  failed, Aborted!" ; exit 1 ; fi
+    fi
+    i=$[$i + 1]
+done
+
+# Now add sp model
+
+# Realign      - use original labels now with sp and redo label correction or use slf if available
+if [ ! $r -gt $i ] ; then
+    echo "REALIGNMENT (ITERATION $i)"
+    if [ $slf = 0 ] ; then
+	    HVite -l \* -C config -a  -m -i aligned.2.mlf -I aligned.0.mlf -T 1  -H hmm${i}/MMF  -S train.scp -y lab dict2 phone_list 
+	    if [ $? -gt 0 ] ; then echo "second alignment failed, Aborted!" ; exit 1 ; fi
+    else
+	    HVite -w -l \* -i aligned.2.mlf.tmp -C config -m -L ../slf -X slf -T 1 -H hmm${i}/MMF -H proto/3statesnull -y lab -S train.scp  dict_slf phone_list_slf
+	    if [ $? -gt 0 ] ; then echo "second alignment (slf) failed, Aborted!" ; exit 1 ; fi
+	    egrep -v ' (\.|#1|#2) ' aligned.2.mlf.tmp > aligned.2.mlf
+	    rm aligned.2.mlf.tmp
+    fi
+fi
+
+# Reestimate a few more times
+for j in 1 2 3; do
+    if [ ! $r -gt $i ] ; then
+	    echo "RE-ESTIMATING MODEL PARAMETERS PHASE 3 (ITERATION $i)"
+	    mkdir -p hmm$[$i +1]
+
+	if [ $slf = 0 ] ; then
+	    #HERest  -C config -T 1 -t 250.0 150.0 1000.0 -H hmm${i}/MMF -H hmm0/vFloors -I aligned.2.mlf -M hmm$[$i +1] -S train.scp phone_list
+		tam_file=$(wc -l < train.scp)
+		iterations=$(($tam_file / 1000))
+		rest=$(($tam_file - (($iterations * 1000))))
+
+		for k in `seq $iterations`;
+		do
+			file_aux=$(head -$(( $k * 1000 )) train.scp | tail -1000)
+			echo "$file_aux" > ./file_aux
+			HERest -p $k -C config -T 1 -t 250.0 150.0 1000.0 -H hmm${i}/MMF -H hmm0/vFloors -I aligned.2.mlf -M hmm$[$i +1] -S file_aux phone_list
+		done
+		if [ $rest > 0 ] ; then
+			file_aux=$(head -$(( $k * 1000 )) train.scp | tail -$rest)
+			echo "$file_aux" > ./file_aux
+			HERest -p $(($iterations +1)) -C config -T 1 -t 250.0 150.0 1000.0 -H hmm${i}/MMF -H hmm0/vFloors -I aligned.2.mlf -M hmm$[$i +1] -S file_aux phone_list
+		fi
+
+		HERest -p 0 -C config -T 1 -t 250.0 150.0 1000.0 -H hmm${i}/MMF -H hmm0/vFloors -M hmm$[$i +1]  phone_list hmm$[$i +1]/*.acc
+
+
+
+	    if [ $? -gt 0 ] ; then echo "Re-estimation $i  failed, Aborted!" ; exit 1 ; fi
+	else
+	    #HERest  -C config -T 1 -t 250.0 150.0 1000.0 -H hmm${i}/MMF -H hmm0/vFloors -H proto/3statesnull -I aligned.2.mlf -M hmm$[$i +1] -S train.scp phone_list_slf
+		tam_file=$(wc -l < train.scp)
+		iterations=$(($tam_file / 1000))
+		rest=$(($tam_file - (($iterations * 1000))))
+
+		for k in `seq $iterations`;
+		do
+			file_aux=$(head -$(( $k * 1000 )) train.scp | tail -1000)
+			echo "$file_aux" > ./file_aux
+			HERest -p $k -C config -T 1 -t 250.0 150.0 1000.0 -H hmm${i}/MMF -H hmm0/vFloors -H proto/3statesnull -I aligned.2.mlf -M hmm$[$i +1] -S file_aux phone_list_slf
+		done
+		if [ $rest > 0 ] ; then
+			file_aux=$(head -$(( $k * 1000 )) train.scp | tail -$rest)
+			echo "$file_aux" > ./file_aux
+			HERest -p $(($iterations +1)) -C config -T 1 -t 250.0 150.0 1000.0 -H hmm${i}/MMF -H hmm0/vFloors -H proto/3statesnull -I aligned.2.mlf -M hmm$[$i +1] -S file_aux phone_list_slf
+		fi
+
+		HERest -p 0 -C config -T 1 -t 250.0 150.0 1000.0 -H hmm${i}/MMF -H hmm0/vFloors -H proto/3statesnull -M hmm$[$i +1]  phone_list_slf hmm$[$i +1]/*.acc
+
+
+	    if [ $? -gt 0 ] ; then echo "Re-estimation $i  failed, Aborted!" ; exit 1 ; fi
+	fi
+    fi
+    i=$[$i + 1]
+done
+
+# Realign      - use original labels 
+if [ ! $r -gt $i ] ; then
+    echo "REALIGNMENT (ITERATION $i)"
+    if [ $slf = 0 ] ; then
+	HVite -l \* -C config -a  -m -i aligned.3.mlf -I aligned.0.mlf -T 1  -H hmm${i}/MMF  -S train.scp -y lab dict2 phone_list 
+	if [ $? -gt 0 ] ; then echo "third alignment failed, Aborted!" ; exit 1 ; fi
+    else
+	HVite -w -l \* -i aligned.3.mlf.tmp -C config -m -L ../slf -X slf -T 1 -H hmm${i}/MMF -H proto/3statesnull -y lab -S train.scp  dict_slf phone_list_slf
+	if [ $? -gt 0 ] ; then echo "third alignment (slf) failed, Aborted!" ; exit 1 ; fi
+	egrep -v ' (\.|#1|#2) ' aligned.3.mlf.tmp > aligned.3.mlf
+	rm aligned.3.mlf.tmp
+    fi
+fi
+
+###
+### INCREASE MISTURES
+###
+
+# Increase mixtures.
+
+for m in 2 3 5 8 ; do
+    if [ ! $r -gt $i ] ; then
+	echo "INCREASING MIXTURES TO $m (ITERATION $i)"  
+	mkdir -p hmm$[$i +1]
+	if [ $slf = 0 ] ; then
+	    HHEd -C config -H hmm${i}/MMF -M hmm$[$i + 1] resources/mixup${m}.hed phone_list
+	    if [ $? -gt 0 ] ; then echo "Mixup to $m mixtures failed, Aborted!" ; exit 1 ; fi
+	else
+	    HHEd -C config -H hmm${i}/MMF -M hmm$[$i + 1] resources/mixup${m}.hed phone_list
+	    if [ $? -gt 0 ] ; then echo "Mixup to $m mixtures failed, Aborted!" ; exit 1 ; fi
+	fi
+    fi
+    i=$[$i + 1]
+    for j in 1 2 3; do
+	if [ ! $r -gt $i ] ; then
+	    echo "RE-ESTIMATING MODEL PARAMETERS PHASE 4 (ITERATION $i)"
+	    mkdir -p hmm$[$i +1]
+	    hold=""
+	    if [ $j -eq 1 ] ; then
+		hold="-u mv" 
+	    fi
+	    if [ $slf = 0 ] ; then
+		#HERest  -C config -T 1 -t 250.0 150.0 1000.0 $hold -H hmm${i}/MMF -H hmm0/vFloors -I aligned.3.mlf -M hmm$[$i + 1] -S train.scp phone_list
+		tam_file=$(wc -l < train.scp)
+		iterations=$(($tam_file / 1000))
+		rest=$(($tam_file - (($iterations * 1000))))
+
+		for k in `seq $iterations`;
+		do
+			file_aux=$(head -$(( $k * 1000 )) train.scp | tail -1000)
+			echo "$file_aux" > ./file_aux
+			HERest -p $k -C config -T 1 -t 250.0 150.0 1000.0 $hold -H hmm${i}/MMF -H hmm0/vFloors -I aligned.3.mlf -M hmm$[$i +1] -S file_aux phone_list
+		done
+		if [ $rest > 0 ] ; then
+			file_aux=$(head -$(( $k * 1000 )) train.scp | tail -$rest)
+			echo "$file_aux" > ./file_aux
+			HERest -p $(($iterations +1)) -C config -T 1 -t 250.0 150.0 1000.0 $hold -H hmm${i}/MMF -H hmm0/vFloors -I aligned.3.mlf -M hmm$[$i +1] -S file_aux phone_list
+		fi
+
+		HERest -p 0 -C config -T 1 -t 250.0 150.0 1000.0 $hold -H hmm${i}/MMF -H hmm0/vFloors -M hmm$[$i +1]  phone_list hmm$[$i +1]/*.acc
+
+
+		if [ $? -gt 0 ] ; then echo "Re-estimation $i failed, Aborted!" ; exit 1 ; fi
+	    else
+		#HERest  -C config -T 1 -t 250.0 150.0 1000.0 $hold -H hmm${i}/MMF -H hmm0/vFloors -H proto/3statesnull -I aligned.3.mlf -M hmm$[$i + 1] -S train.scp phone_list_slf
+		tam_file=$(wc -l < train.scp)
+		iterations=$(($tam_file / 1000))
+		rest=$(($tam_file - (($iterations * 1000))))
+
+		for k in `seq $iterations`;
+		do
+			file_aux=$(head -$(( $k * 1000 )) train.scp | tail -1000)
+			echo "$file_aux" > ./file_aux
+			HERest -p $k -C config -T 1 -t 250.0 150.0 1000.0 $hold -H hmm${i}/MMF -H hmm0/vFloors -H proto/3statesnull -I aligned.3.mlf -M hmm$[$i +1] -S file_aux phone_list_slf
+		done
+		if [ $rest > 0 ] ; then
+			file_aux=$(head -$(( $k * 1000 )) train.scp | tail -$rest)
+			echo "$file_aux" > ./file_aux
+			HERest -p $(($iterations +1)) -C config -T 1 -t 250.0 150.0 1000.0 $hold -H hmm${i}/MMF -H hmm0/vFloors -H proto/3statesnull -I aligned.3.mlf -M hmm$[$i +1] -S file_aux phone_list_slf
+		fi
+		HERest -p 0 -C config -T 1 -t 250.0 150.0 1000.0 $hold -H hmm${i}/MMF -H hmm0/vFloors -H proto/3statesnull -M hmm$[$i +1]  phone_list_slf hmm$[$i +1]/*.acc
+
+		if [ $? -gt 0 ] ; then echo "Re-estimation $i failed, Aborted!" ; exit 1 ; fi
+	    fi
+	fi
+	i=$[$i + 1]
+    done    
+done
+
+# Final alignment
+
+echo "FINAL ALIGNMENT (ITERATION $i)"
+if [ $slf = 0 ] ; then
+    HVite -l \* -C config -a -m -i aligned.4.mlf -I aligned.0.mlf -T 1 -o N -H hmm${i}/MMF  dict2 phone_list -S train.scp
+    if [ $? -gt 0 ] ; then echo "Final alignment failed, Aborted!" ; exit 1 ; fi
+else
+    HVite -w -l \* -i aligned.4.mlf -C config -m -L ../slf -X slf -T 1 -o N -H hmm${i}/MMF -H proto/3statesnull -S train.scp  dict_slf phone_list_slf
+    if [ $? -gt 0 ] ; then echo "Final alignment (slf) failed, Aborted!" ; exit 1 ; fi
+fi
