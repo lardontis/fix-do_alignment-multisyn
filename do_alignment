@@ -155,24 +155,31 @@ if [ "$r" -eq -1 ] ; then
 fi
 
 i=0
-
+chunks=500
 # Re-estimation
 for j in 1 2 3; do
     if [ ! $r -gt $i ] ; then
 	echo "RE-ESTIMATING MODEL PARAMETERS PHASE 1 (ITERATION $i)"
 	mkdir -p hmm$[$i +1]
 	tam_file=$(wc -l < train.scp)
-	iterations=$(($tam_file / 1000))
-	rest=$(($tam_file - (($iterations * 1000))))
+	iterations=$(($tam_file / $chunks))
+	rest=$(($tam_file - (($iterations * $chunks))))
 
 	for k in `seq $iterations`;
 	do
-		file_aux=$(head -$(( $k * 1000 )) train.scp | tail -1000)
+		file_aux=$(head -$(( $k * $chunks )) train.scp | tail -$chunks)
 		echo "$file_aux" > ./file_aux
 		HERest -p $k -C config -T 1023 -t 250.0 150.0 1000.0 -H hmm${i}/MMF -H hmm0/vFloors -I aligned.0.nosp.mlf -M hmm$[$i +1] -S file_aux phone_list
 	done
 	if [ $rest > 0 ] ; then
-		file_aux=$(head -$(( $k * 1000 )) train.scp | tail -$rest)
+		if [ $iterations == 0 ] ; then
+			k=0
+			echo $k
+		fi
+		file_aux=$(head -$(( $k * $chunks )) train.scp | tail -$rest)
+		if [ $iterations == 0 ] ; then
+			file_aux=$(head -$chunks train.scp)
+		fi
 		echo "$file_aux" > ./file_aux
 		HERest -p $(($iterations +1)) -C config -T 1023 -t 250.0 150.0 1000.0 -H hmm${i}/MMF -H hmm0/vFloors -I aligned.0.nosp.mlf -M hmm$[$i +1] -S file_aux phone_list
 	fi
@@ -215,17 +222,23 @@ for j in 1 2 3; do
 	    #HERest  -C config -T 1 -t 250.0 150.0 1000.0 -H hmm${i}/MMF -H hmm0/vFloors -I aligned.1.mlf -M hmm$[$i +1] -S train.scp phone_list
 
 		tam_file=$(wc -l < train.scp)
-		iterations=$(($tam_file / 1000))
-		rest=$(($tam_file - (($iterations * 1000))))
+		iterations=$(($tam_file / $chunks))
+		rest=$(($tam_file - (($iterations * $chunks))))
 
 		for k in `seq $iterations`;
 		do
-			file_aux=$(head -$(( $k * 1000 )) train.scp | tail -1000)
+			file_aux=$(head -$(( $k * $chunks )) train.scp | tail -$chunks)
 			echo "$file_aux" > ./file_aux
 			HERest -p $k -C config -T 1 -t 250.0 150.0 1000.0 -H hmm${i}/MMF -H hmm0/vFloors -I aligned.1.mlf -M hmm$[$i +1] -S file_aux phone_list
 		done
 		if [ $rest > 0 ] ; then
-			file_aux=$(head -$(( $k * 1000 )) train.scp | tail -$rest)
+			if [ $iterations == 0 ] ; then
+				k=0
+			fi
+			file_aux=$(head -$(( $k * $chunks )) train.scp | tail -$rest)
+			if [ $iterations == 0 ] ; then
+				file_aux=$(head -$chunks train.scp)
+			fi
 			echo "$file_aux" > ./file_aux
 			HERest -p $(($iterations +1)) -C config -T 1 -t 250.0 150.0 1000.0 -H hmm${i}/MMF -H hmm0/vFloors -I aligned.1.mlf -M hmm$[$i +1] -S file_aux phone_list
 		fi
@@ -262,17 +275,23 @@ for j in 1 2 3; do
 	if [ $slf = 0 ] ; then
 	    #HERest  -C config -T 1 -t 250.0 150.0 1000.0 -H hmm${i}/MMF -H hmm0/vFloors -I aligned.2.mlf -M hmm$[$i +1] -S train.scp phone_list
 		tam_file=$(wc -l < train.scp)
-		iterations=$(($tam_file / 1000))
-		rest=$(($tam_file - (($iterations * 1000))))
+		iterations=$(($tam_file / $chunks))
+		rest=$(($tam_file - (($iterations * $chunks))))
 
 		for k in `seq $iterations`;
 		do
-			file_aux=$(head -$(( $k * 1000 )) train.scp | tail -1000)
+			file_aux=$(head -$(( $k * $chunks )) train.scp | tail -$chunks)
 			echo "$file_aux" > ./file_aux
 			HERest -p $k -C config -T 1 -t 250.0 150.0 1000.0 -H hmm${i}/MMF -H hmm0/vFloors -I aligned.2.mlf -M hmm$[$i +1] -S file_aux phone_list
 		done
 		if [ $rest > 0 ] ; then
-			file_aux=$(head -$(( $k * 1000 )) train.scp | tail -$rest)
+			if [ $iterations == 0 ] ; then
+				k=0
+			fi
+			file_aux=$(head -$(( $k * $chunks )) train.scp | tail -$rest)
+			if [ $iterations == 0 ] ; then
+				file_aux=$(head -$chunks train.scp)
+			fi
 			echo "$file_aux" > ./file_aux
 			HERest -p $(($iterations +1)) -C config -T 1 -t 250.0 150.0 1000.0 -H hmm${i}/MMF -H hmm0/vFloors -I aligned.2.mlf -M hmm$[$i +1] -S file_aux phone_list
 		fi
@@ -285,17 +304,23 @@ for j in 1 2 3; do
 	else
 	    #HERest  -C config -T 1 -t 250.0 150.0 1000.0 -H hmm${i}/MMF -H hmm0/vFloors -H proto/3statesnull -I aligned.2.mlf -M hmm$[$i +1] -S train.scp phone_list_slf
 		tam_file=$(wc -l < train.scp)
-		iterations=$(($tam_file / 1000))
-		rest=$(($tam_file - (($iterations * 1000))))
+		iterations=$(($tam_file / $chunks))
+		rest=$(($tam_file - (($iterations * $chunks))))
 
 		for k in `seq $iterations`;
 		do
-			file_aux=$(head -$(( $k * 1000 )) train.scp | tail -1000)
+			file_aux=$(head -$(( $k * $chunks )) train.scp | tail -$chunks)
 			echo "$file_aux" > ./file_aux
 			HERest -p $k -C config -T 1 -t 250.0 150.0 1000.0 -H hmm${i}/MMF -H hmm0/vFloors -H proto/3statesnull -I aligned.2.mlf -M hmm$[$i +1] -S file_aux phone_list_slf
 		done
 		if [ $rest > 0 ] ; then
-			file_aux=$(head -$(( $k * 1000 )) train.scp | tail -$rest)
+			if [ $iterations == 0 ] ; then
+				k=0
+			fi
+			file_aux=$(head -$(( $k * $chunks )) train.scp | tail -$rest)
+			if [ $iterations == 0 ] ; then
+				file_aux=$(head -$chunks train.scp)
+			fi
 			echo "$file_aux" > ./file_aux
 			HERest -p $(($iterations +1)) -C config -T 1 -t 250.0 150.0 1000.0 -H hmm${i}/MMF -H hmm0/vFloors -H proto/3statesnull -I aligned.2.mlf -M hmm$[$i +1] -S file_aux phone_list_slf
 		fi
@@ -353,17 +378,23 @@ for m in 2 3 5 8 ; do
 	    if [ $slf = 0 ] ; then
 		#HERest  -C config -T 1 -t 250.0 150.0 1000.0 $hold -H hmm${i}/MMF -H hmm0/vFloors -I aligned.3.mlf -M hmm$[$i + 1] -S train.scp phone_list
 		tam_file=$(wc -l < train.scp)
-		iterations=$(($tam_file / 1000))
-		rest=$(($tam_file - (($iterations * 1000))))
+		iterations=$(($tam_file / $chunks))
+		rest=$(($tam_file - (($iterations * $chunks))))
 
 		for k in `seq $iterations`;
 		do
-			file_aux=$(head -$(( $k * 1000 )) train.scp | tail -1000)
+			file_aux=$(head -$(( $k * $chunks )) train.scp | tail -$chunks)
 			echo "$file_aux" > ./file_aux
 			HERest -p $k -C config -T 1 -t 250.0 150.0 1000.0 $hold -H hmm${i}/MMF -H hmm0/vFloors -I aligned.3.mlf -M hmm$[$i +1] -S file_aux phone_list
 		done
 		if [ $rest > 0 ] ; then
-			file_aux=$(head -$(( $k * 1000 )) train.scp | tail -$rest)
+			if [ $iterations == 0 ] ; then
+				k=0
+			fi
+			file_aux=$(head -$(( $k * $chunks )) train.scp | tail -$rest)
+			if [ $iterations == 0 ] ; then
+				file_aux=$(head -$chunks train.scp)
+			fi
 			echo "$file_aux" > ./file_aux
 			HERest -p $(($iterations +1)) -C config -T 1 -t 250.0 150.0 1000.0 $hold -H hmm${i}/MMF -H hmm0/vFloors -I aligned.3.mlf -M hmm$[$i +1] -S file_aux phone_list
 		fi
@@ -375,17 +406,23 @@ for m in 2 3 5 8 ; do
 	    else
 		#HERest  -C config -T 1 -t 250.0 150.0 1000.0 $hold -H hmm${i}/MMF -H hmm0/vFloors -H proto/3statesnull -I aligned.3.mlf -M hmm$[$i + 1] -S train.scp phone_list_slf
 		tam_file=$(wc -l < train.scp)
-		iterations=$(($tam_file / 1000))
-		rest=$(($tam_file - (($iterations * 1000))))
+		iterations=$(($tam_file / $chunks))
+		rest=$(($tam_file - (($iterations * $chunks))))
 
 		for k in `seq $iterations`;
 		do
-			file_aux=$(head -$(( $k * 1000 )) train.scp | tail -1000)
+			file_aux=$(head -$(( $k * $chunks )) train.scp | tail -$chunks)
 			echo "$file_aux" > ./file_aux
 			HERest -p $k -C config -T 1 -t 250.0 150.0 1000.0 $hold -H hmm${i}/MMF -H hmm0/vFloors -H proto/3statesnull -I aligned.3.mlf -M hmm$[$i +1] -S file_aux phone_list_slf
 		done
 		if [ $rest > 0 ] ; then
-			file_aux=$(head -$(( $k * 1000 )) train.scp | tail -$rest)
+			if [ $iterations == 0 ] ; then
+				k=0
+			fi
+			file_aux=$(head -$(( $k * $chunks )) train.scp | tail -$rest)
+			if [ $iterations == 0 ] ; then
+				file_aux=$(head -$chunks train.scp)
+			fi
 			echo "$file_aux" > ./file_aux
 			HERest -p $(($iterations +1)) -C config -T 1 -t 250.0 150.0 1000.0 $hold -H hmm${i}/MMF -H hmm0/vFloors -H proto/3statesnull -I aligned.3.mlf -M hmm$[$i +1] -S file_aux phone_list_slf
 		fi
